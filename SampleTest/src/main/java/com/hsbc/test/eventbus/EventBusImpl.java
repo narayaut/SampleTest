@@ -19,36 +19,35 @@ public class EventBusImpl implements EventBus {
     private final Map<Class<?>, Map<Subscriber, CopyOnWriteArraySet<Predicate<Object>>>> subscribers;
     private final LinkedBlockingQueue<Object> queue;
     private final Map<Class<? extends ConflatedEvent>, AtomicReference<ConflatedEvent>> conflatedEventsMap;
-    private final Executor executor;
+    private final ExecutorService executor;
     private volatile boolean shutdown = false;
 
-    public EventBusImpl(int maxCapacity, boolean sameThreadForProducerConsumer){
+    public EventBusImpl(int maxCapacity){
         subscribers = new ConcurrentHashMap<>();
         queue = new LinkedBlockingQueue<>(maxCapacity);
         conflatedEventsMap = new ConcurrentHashMap<>();
-        if(sameThreadForProducerConsumer) {
-            executor = Executors.newSingleThreadExecutor(r -> Thread.currentThread());
-        }else{
-            executor = Executors.newSingleThreadExecutor();
-        }
-        start();
+        executor = Executors.newSingleThreadExecutor();
+
+        startSubscriptionExecutor();
     }
 
     public static void main(String[] args) throws InterruptedException {
-        slowConsumer();
+        // orders are never conflated since they are not a conflated event
+        //price ticks are conflated, if consumer is slow.
+        testSlowConsumer();
 
     }
 
-    private static void slowConsumer() throws InterruptedException {
-        EventBus eventBus = new EventBusImpl(100, false);
+    private static void testSlowConsumer() throws InterruptedException {
+        EventBusImpl eventBus = new EventBusImpl(100);
 
-        eventBus.addSubscriber(Order.class, event -> LOG.info("received order " + event));
+        eventBus.addSubscriber(Order.class, event -> LOG.info("Received order " + event));
 
         //price consumer is slow. so price ticks will be collated.
         eventBus.addSubscriber(Price.class, event -> {
-            LOG.info("received price " + event);
+            LOG.info("Received price " + event);
             try {
-                Thread.sleep(1000);
+                Thread.sleep(100);// simulated slow consumer
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -57,6 +56,7 @@ public class EventBusImpl implements EventBus {
         eventBus.publishEvent(new Order(1L));
         eventBus.publishEvent(new Order(2L));
 
+        //fast publisher
         eventBus.publishEvent(new Price(30L));
         eventBus.publishEvent(new Price(31L));
         eventBus.publishEvent(new Price(32L));
@@ -64,21 +64,28 @@ public class EventBusImpl implements EventBus {
         eventBus.publishEvent(new Price(34L));
         eventBus.publishEvent(new Price(35L));
 
-    }
-
-    private void start(){
-        startSubscriptionExecutor();
+        Thread.sleep(1000);
+        eventBus.shutDown();
     }
 
     public void shutDown() {
         shutdown = true;
+        executor.shutdown();
+        try{
+            executor.awaitTermination(1000, TimeUnit.MILLISECONDS);
+        }catch(InterruptedException e){
+
+        }finally{
+            executor.shutdownNow();
+        }
+
     }
 
     private void startSubscriptionExecutor() {
-        executor.execute(() -> {
+        executor.execute(() ->{
             while(!shutdown) {
                 try {
-                    final Object event = queue.take();
+                    final Object event = queue.poll(10, TimeUnit.MILLISECONDS);
                     if(event != null) {
                         if(event instanceof Event) {
                             sendToSubscribers((Event)event);
